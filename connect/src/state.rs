@@ -5,6 +5,8 @@ mod options;
 pub(super) mod provider;
 mod restrictions;
 mod tracks;
+
+pub use tracks::UpcomingTrack;
 mod transfer;
 
 use crate::{

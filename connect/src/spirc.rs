@@ -20,12 +20,14 @@ use crate::{
         connect::{Cluster, ClusterUpdate, LogoutCommand, SetVolumeCommand},
         context::Context,
         explicit_content_pubsub::UserAttributesUpdate,
+        player::ProvidedTrack,
         playlist4_external::PlaylistModificationInfo,
         social_connect_v2::SessionUpdate,
         transfer_state::TransferState,
         user_attributes::UserAttributesMutation,
     },
     state::{
+        UpcomingTrack,
         context::{ContextType, ResetContext},
         provider::IsProvider,
         {ConnectConfig, ConnectState},
@@ -41,7 +43,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::{mpsc, watch},
+    time::sleep,
+};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -109,6 +114,9 @@ struct SpircTask {
     update_state: bool,
 
     spirc_id: usize,
+
+    /// The tracks after the current one, published for [Spirc::upcoming_tracks].
+    upcoming: watch::Sender<Vec<UpcomingTrack>>,
 }
 
 static SPIRC_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -132,6 +140,10 @@ enum SpircCommand {
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
+    AddToQueue(String),
+    RemoveFromQueue(String),
+    ClearQueue,
+    SkipTo(String),
 }
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
@@ -144,6 +156,7 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 /// The spotify connect handle
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
+    upcoming: watch::Receiver<Vec<UpcomingTrack>>,
 }
 
 impl Spirc {
@@ -220,6 +233,7 @@ impl Spirc {
         let _ = session.login5().auth_token().await?;
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (upcoming_tx, upcoming_rx) = watch::channel(Vec::new());
 
         let player_events = player.get_player_event_channel();
 
@@ -255,9 +269,13 @@ impl Spirc {
             update_state: false,
 
             spirc_id,
+            upcoming: upcoming_tx,
         };
 
-        let spirc = Spirc { commands: cmd_tx };
+        let spirc = Spirc {
+            commands: cmd_tx,
+            upcoming: upcoming_rx,
+        };
 
         let initial_volume = task.connect_state.device_info().volume;
         task.connect_state.set_volume(0);
@@ -400,6 +418,41 @@ impl Spirc {
     /// Does not [Spirc::transfer] the playback. Does nothing if we are not the active device.
     pub fn activate(&self) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Activate)?)
+    }
+
+    /// Plays `uri` after the current track and any tracks queued before it.
+    ///
+    /// Does nothing if we are not the active device.
+    pub fn add_to_queue(&self, uri: String) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::AddToQueue(uri))?)
+    }
+
+    /// Removes the queued track identified by [UpcomingTrack::uid].
+    ///
+    /// Does nothing if we are not the active device.
+    pub fn remove_from_queue(&self, uid: String) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::RemoveFromQueue(uid))?)
+    }
+
+    /// Removes every queued track; the context continues as before.
+    ///
+    /// Does nothing if we are not the active device.
+    pub fn clear_queue(&self) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::ClearQueue)?)
+    }
+
+    /// Skips ahead to the upcoming track identified by [UpcomingTrack::uid],
+    /// dropping the tracks before it, and starts playing it.
+    ///
+    /// Does nothing if we are not the active device.
+    pub fn skip_to_upcoming(&self, uid: String) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::SkipTo(uid))?)
+    }
+
+    /// The tracks that play after the current one, including queued tracks
+    /// from any Spotify client. Empty while we are not the active device.
+    pub fn upcoming_tracks(&self) -> watch::Receiver<Vec<UpcomingTrack>> {
+        self.upcoming.clone()
     }
 
     /// Acquires the control as active connect device over the transfer flow.
@@ -679,6 +732,18 @@ impl SpircTask {
             SpircCommand::SetPosition(position) => self.handle_seek(position),
             SpircCommand::SetVolume(volume) => self.set_volume(volume),
             SpircCommand::Load(command) => self.handle_load(command, None, None).await?,
+            SpircCommand::AddToQueue(uri) => {
+                let track = ProvidedTrack {
+                    uri,
+                    ..Default::default()
+                };
+                self.connect_state.add_to_queue(track, true)
+            }
+            SpircCommand::RemoveFromQueue(uid) => {
+                self.connect_state.remove_from_queue(&uid);
+            }
+            SpircCommand::ClearQueue => self.connect_state.clear_queue(),
+            SpircCommand::SkipTo(uid) => self.handle_skip_to(&uid)?,
         };
 
         self.notify().await
@@ -942,6 +1007,7 @@ impl SpircTask {
             }
         } else if self.connect_state.is_active() {
             self.connect_state.became_inactive(&self.session).await?;
+            self.publish_upcoming();
         }
 
         Ok(())
@@ -1221,6 +1287,7 @@ impl SpircTask {
         self.notify().await?;
 
         self.connect_state.became_inactive(&self.session).await?;
+        self.publish_upcoming();
 
         self.player
             .emit_session_disconnected_event(self.session.connection_id(), self.session.username());
@@ -1638,6 +1705,31 @@ impl SpircTask {
         }
     }
 
+    fn handle_skip_to(&mut self, uid: &str) -> Result<(), Error> {
+        let Some(steps) = self
+            .connect_state
+            .upcoming_tracks()
+            .iter()
+            .position(|t| t.uid == uid)
+        else {
+            warn!("skip target {uid} is not an upcoming track");
+            return Ok(());
+        };
+        // Hidden delimiters are skipped too, so allow some slack; the loop stops
+        // as soon as the target is current and is bounded if it was unavailable.
+        for _ in 0..=steps * 2 + 8 {
+            if self.connect_state.next_track()?.is_none() {
+                self.handle_stop();
+                return Ok(());
+            }
+            if self.connect_state.current_track(|t| t.uid == uid) {
+                break;
+            }
+        }
+        self.add_autoplay_resolving_when_required();
+        self.load_track(true, 0)
+    }
+
     fn handle_prev(&mut self) -> Result<(), Error> {
         // Previous behaves differently based on the position
         // Under 3s it goes to the previous song (starts playing)
@@ -1796,11 +1888,27 @@ impl SpircTask {
         }
 
         self.connect_state.set_now(self.now_ms() as u64);
+        self.publish_upcoming();
 
         self.connect_state
             .send_state(&self.session)
             .await
             .map(|_| ())
+    }
+
+    fn publish_upcoming(&self) {
+        let upcoming = if self.connect_state.is_active() {
+            self.connect_state.upcoming_tracks()
+        } else {
+            Vec::new()
+        };
+        self.upcoming.send_if_modified(|current| {
+            let changed = *current != upcoming;
+            if changed {
+                *current = upcoming;
+            }
+            changed
+        });
     }
 
     fn set_volume(&mut self, volume: u16) {

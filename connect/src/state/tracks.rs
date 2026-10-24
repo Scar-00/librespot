@@ -14,6 +14,17 @@ use rand::Rng;
 // identifier used as part of the uid
 pub const IDENTIFIER_DELIMITER: &str = "delimiter";
 
+/// A track that plays after the current one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpcomingTrack {
+    /// The track's Spotify URI.
+    pub uri: String,
+    /// Identifies this entry, e.g. to [`crate::Spirc::remove_from_queue`] it.
+    pub uid: String,
+    /// Whether the user queued it, rather than it coming from the context or autoplay.
+    pub queued: bool,
+}
+
 impl<'ct> ConnectState {
     fn new_delimiter(iteration: i64) -> ProvidedTrack {
         let mut delimiter = ProvidedTrack {
@@ -409,6 +420,41 @@ impl<'ct> ConnectState {
         self.update_queue_revision();
 
         Ok(())
+    }
+
+    /// Removes the queued track with `uid`. Returns whether one was removed.
+    pub fn remove_from_queue(&mut self, uid: &str) -> bool {
+        let next_tracks = self.next_tracks_mut();
+        let Some(index) = next_tracks
+            .iter()
+            .position(|t| t.is_queue() && t.uid == uid)
+        else {
+            return false;
+        };
+        next_tracks.remove(index);
+        self.update_queue_revision();
+        self.update_restrictions();
+        true
+    }
+
+    /// Removes every track the user queued, keeping the context's next tracks.
+    pub fn clear_queue(&mut self) {
+        self.next_tracks_mut().retain(|t| !t.is_queue());
+        self.update_queue_revision();
+        self.update_restrictions();
+    }
+
+    /// The visible tracks that play after the current one, in order.
+    pub fn upcoming_tracks(&self) -> Vec<UpcomingTrack> {
+        self.next_tracks()
+            .iter()
+            .filter(|t| !t.uri.is_empty() && !t.uid.starts_with(IDENTIFIER_DELIMITER))
+            .map(|t| UpcomingTrack {
+                uri: t.uri.clone(),
+                uid: t.uid.clone(),
+                queued: t.is_queue(),
+            })
+            .collect()
     }
 
     pub fn add_to_queue(&mut self, mut track: ProvidedTrack, rev_update: bool) {
