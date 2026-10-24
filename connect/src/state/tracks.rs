@@ -437,6 +437,31 @@ impl<'ct> ConnectState {
         true
     }
 
+    /// Moves the queued track with `uid` so it becomes the `to`th queued track
+    /// (clamped to the last). Returns whether it was moved.
+    pub fn move_in_queue(&mut self, uid: &str, to: usize) -> bool {
+        let next_tracks = self.next_tracks_mut();
+        let Some(from) = next_tracks
+            .iter()
+            .position(|t| t.is_queue() && t.uid == uid)
+        else {
+            return false;
+        };
+        let track = next_tracks.remove(from);
+        let mut queued = next_tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.is_queue())
+            .map(|(i, _)| i);
+        let index = match queued.clone().nth(to) {
+            Some(index) => index,
+            None => queued.next_back().map_or(0, |last| last + 1),
+        };
+        next_tracks.insert(index, track);
+        self.update_queue_revision();
+        true
+    }
+
     /// Removes every track the user queued, keeping the context's next tracks.
     pub fn clear_queue(&mut self) {
         self.next_tracks_mut().retain(|t| !t.is_queue());

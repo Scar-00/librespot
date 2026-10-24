@@ -142,6 +142,7 @@ enum SpircCommand {
     Load(LoadRequest),
     AddToQueue(String),
     RemoveFromQueue(String),
+    MoveInQueue(String, usize),
     ClearQueue,
     SkipTo(String),
 }
@@ -432,6 +433,14 @@ impl Spirc {
     /// Does nothing if we are not the active device.
     pub fn remove_from_queue(&self, uid: String) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::RemoveFromQueue(uid))?)
+    }
+
+    /// Moves the queued track identified by [UpcomingTrack::uid] so it becomes
+    /// the `to`th queued track, counting from zero.
+    ///
+    /// Does nothing if we are not the active device.
+    pub fn move_in_queue(&self, uid: String, to: usize) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::MoveInQueue(uid, to))?)
     }
 
     /// Removes every queued track; the context continues as before.
@@ -741,6 +750,9 @@ impl SpircTask {
             }
             SpircCommand::RemoveFromQueue(uid) => {
                 self.connect_state.remove_from_queue(&uid);
+            }
+            SpircCommand::MoveInQueue(uid, to) => {
+                self.connect_state.move_in_queue(&uid, to);
             }
             SpircCommand::ClearQueue => self.connect_state.clear_queue(),
             SpircCommand::SkipTo(uid) => self.handle_skip_to(&uid)?,
