@@ -23,6 +23,8 @@ pub struct UpcomingTrack {
     pub uid: String,
     /// Whether the user queued it, rather than it coming from the context or autoplay.
     pub queued: bool,
+    /// Whether autoplay picked it after the context ran out.
+    pub autoplay: bool,
 }
 
 impl<'ct> ConnectState {
@@ -478,6 +480,7 @@ impl<'ct> ConnectState {
                 uri: t.uri.clone(),
                 uid: t.uid.clone(),
                 queued: t.is_queue(),
+                autoplay: t.is_autoplay(),
             })
             .collect()
     }
