@@ -117,6 +117,7 @@ enum PlayerCommand {
     SetSinkEventCallback(Option<SinkEventCallback>),
     EmitVolumeChangedEvent(u16),
     SetAutoNormaliseAsAlbum(bool),
+    SetBitrate(Bitrate),
     EmitSessionDisconnectedEvent {
         connection_id: String,
         user_name: String,
@@ -601,6 +602,11 @@ impl Player {
 
     pub fn set_auto_normalise_as_album(&self, setting: bool) {
         self.command(PlayerCommand::SetAutoNormaliseAsAlbum(setting));
+    }
+
+    /// Streams tracks loaded from now on at `bitrate`; the playing one keeps its own.
+    pub fn set_bitrate(&self, bitrate: Bitrate) {
+        self.command(PlayerCommand::SetBitrate(bitrate));
     }
 
     pub fn emit_filter_explicit_content_changed_event(&self, filter: bool) {
@@ -2338,6 +2344,8 @@ impl PlayerInternal {
                 self.auto_normalise_as_album = setting
             }
 
+            PlayerCommand::SetBitrate(bitrate) => self.config.bitrate = bitrate,
+
             PlayerCommand::EmitFilterExplicitContentChangedEvent(filter) => {
                 self.send_event(PlayerEvent::FilterExplicitContentChanged { filter });
 
@@ -2494,6 +2502,9 @@ impl fmt::Debug for PlayerCommand {
                 .debug_tuple("SetAutoNormaliseAsAlbum")
                 .field(&setting)
                 .finish(),
+            PlayerCommand::SetBitrate(bitrate) => {
+                f.debug_tuple("SetBitrate").field(&bitrate).finish()
+            }
             PlayerCommand::EmitFilterExplicitContentChangedEvent(filter) => f
                 .debug_tuple("EmitFilterExplicitContentChangedEvent")
                 .field(&filter)
